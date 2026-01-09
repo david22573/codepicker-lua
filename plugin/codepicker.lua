@@ -1,4 +1,3 @@
--- plugin/codepicker.lua
 if vim.g.loaded_codepicker then
 	return
 end
@@ -6,16 +5,25 @@ vim.g.loaded_codepicker = 1
 
 local codepicker = require("codepicker")
 
--- Command: :CodePickerAsk "How does this work?"
+-- Command: :CodePickerAsk "Query" (Focus Current File)
+-- Command: :CodePickerAsk --all "Query" (Whole Repo)
 vim.api.nvim_create_user_command("CodePickerAsk", function(opts)
-	if opts.args == "" then
+	local args = opts.args
+	local options = { all = false }
+
+	if args:match("^%-%-all") then
+		options.all = true
+		args = args:gsub("^%-%-all%s*", "")
+	end
+
+	if args == "" then
 		print("❌ Please provide a query.")
 		return
 	end
-	codepicker.ask(opts.args)
+	codepicker.ask(args, options)
 end, { nargs = "+" })
 
--- Command: :CodePickerEdit "Rename variable X to Y"
+-- Edit is always focused on current file
 vim.api.nvim_create_user_command("CodePickerEdit", function(opts)
 	if opts.args == "" then
 		print("❌ Please provide instructions.")
