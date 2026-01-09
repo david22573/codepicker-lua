@@ -1,38 +1,48 @@
 local M = {}
 local config = require("codepicker.config")
 
--- KEY MAPPING HELPER
+-- REVIEW MODE KEYMAPS
+-- 1. Normal Mode <C-Enter>: Accepts current block & formats
+-- 2. Visual Mode <C-Enter>: Accepts ONLY selected lines & formats
 local function set_review_keymaps(buf, diff_win, scratch_win)
 	local opts = { noremap = true, silent = true, buffer = buf }
 
-	-- Accept Changes (Ctrl+Enter)
-	-- Logic: Go to next change, Get it (do), Save.
+	-- NORMAL MODE: Accept Whole Block
 	vim.keymap.set("n", "<C-CR>", function()
-		-- Note: <C-CR> support varies by terminal. If it fails, map <Leader>a
-		vim.cmd("normal! ]c") -- Jump to change
-		vim.cmd("normal! do") -- Diff Obtain (Pull change from AI)
-		vim.cmd("update") -- Save file
-		print("✅ Change Accepted & Saved.")
+		vim.cmd("normal! do") -- Diff Obtain
+		vim.cmd("update") -- Save
+		vim.lsp.buf.format() -- Auto-Format via LSP
+		print("✅ Block Accepted & Formatted.")
 	end, opts)
 
-	-- Decline / Close (Ctrl+Backspace)
-	-- Logic: Close the scratch window, turn off diff mode.
-	vim.keymap.set("n", "<C-BS>", function()
-		-- Turn off diff for current window
+	-- VISUAL MODE: Accept Partial Selection
+	vim.keymap.set("v", "<C-CR>", function()
+		-- Escape visual mode to set marks '< and '>
+		vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+
+		vim.schedule(function()
+			-- Apply diffget strictly to the selection
+			vim.cmd("'<,'>diffget")
+			vim.cmd("update")
+			vim.lsp.buf.format()
+			print("✅ Selection Accepted & Formatted.")
+		end)
+	end, opts)
+
+	-- DECLINE: Close Review
+	vim.keymap.set({ "n", "v" }, "<C-BS>", function()
 		vim.cmd("diffoff")
-		-- Close the AI's scratch window
 		if vim.api.nvim_win_is_valid(scratch_win) then
 			vim.api.nvim_win_close(scratch_win, true)
 		end
 		print("❌ Review Cancelled.")
 	end, opts)
 
-	-- Add a visual Reminder
-	print("REVIEW MODE: <C-Enter> Accept | <C-Backspace> Decline")
+	print("REVIEW: <C-Enter> to Accept (Normal/Visual) | <C-Backspace> to Decline")
 end
 
 local function setup_diff_view(original_buf, new_buf)
-	-- 1. Setup Right Window (AI Proposal)
+	-- Setup Right Window (AI Proposal)
 	local ai_wins = vim.fn.win_findbuf(new_buf)
 	if #ai_wins > 0 then
 		local win = ai_wins[1]
@@ -40,19 +50,19 @@ local function setup_diff_view(original_buf, new_buf)
 		vim.cmd("diffthis")
 	end
 
-	-- 2. Setup Left Window (Your Code)
+	-- Setup Left Window (Your Code)
 	local orig_wins = vim.fn.win_findbuf(original_buf)
 	if #orig_wins > 0 then
 		local win = orig_wins[1]
 		vim.api.nvim_set_current_win(win)
 		vim.cmd("diffthis")
 
-		-- Apply keymaps to YOUR buffer so you can drive the review
+		-- Attach keymaps to YOUR buffer
 		set_review_keymaps(original_buf, original_buf, ai_wins[1])
 	end
 end
 
--- Helper to strip code fences
+-- Strip markdown code fences
 local function clean_fences(line)
 	if line:match("^```") then
 		return nil
@@ -60,17 +70,14 @@ local function clean_fences(line)
 	return line
 end
 
--- 1. CHAT MODE (Ask)
+-- CHAT MODE (Ask)
 function M.ask(query, opts)
 	opts = opts or {}
 	local use_all_files = opts.all or false
-
 	local current_file = vim.fn.expand("%:p")
 
-	-- Build command
 	local cmd = { config.options.cmd, "ask", query, "--model", config.options.model }
 
-	-- Context Strategy: Default to Current File
 	if not use_all_files and current_file ~= "" then
 		table.insert(cmd, "--focus")
 		table.insert(cmd, current_file)
@@ -117,7 +124,7 @@ function M.ask(query, opts)
 	})
 end
 
--- 2. EDIT MODE (Refactor)
+-- EDIT MODE (Refactor)
 function M.refactor(instruction)
 	local current_buf = vim.api.nvim_get_current_buf()
 	local current_file = vim.fn.expand("%:p")
@@ -136,12 +143,12 @@ function M.refactor(instruction)
 
 	-- Strict Prompt for Code Only
 	local strict_prompt = string.format(
-		"Refactor file: %s.\nINSTRUCTION: %s\n" .. "CRITICAL: Output ONLY valid code. No markdown. No text.",
+		"Refactor file: %s.\nINSTRUCTION: %s\n"
+			.. "CRITICAL: Output ONLY valid code. No markdown. No text. Keep indentation clean.",
 		current_file,
 		instruction
 	)
 
-	-- Always focus ONLY on the current file for edits (safer)
 	local cmd = {
 		config.options.cmd,
 		"ask",
