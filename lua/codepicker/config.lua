@@ -1,21 +1,18 @@
--- lua/codepicker/config.lua
 local M = {}
 
 M.defaults = {
-	-- The binary name or full path to your Go tool
 	cmd = "codepicker",
-
-	-- The model to use on OpenRouter
 	model = "xiaomi/mimo-v2-flash:free",
-
-	-- Edit mode settings
-	edit = {
-		-- Automatically open diff view after generation?
+	ui = {
 		diff_view = true,
+		wrap = true,
+	},
+	keymaps = {
+		accept = "<C-CR>",
+		decline = "<C-BS>",
 	},
 }
 
--- Allow user to override config via setup()
 M.options = vim.deepcopy(M.defaults)
 
 function M.setup(opts)
