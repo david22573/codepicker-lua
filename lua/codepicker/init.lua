@@ -3,14 +3,37 @@ local config = require("codepicker.config")
 local ui = require("codepicker.ui")
 local job = require("codepicker.job")
 
--- Utility to clean markdown fences for Refactor mode
-local function clean_line(line)
-	-- Remove ```go, ```lua, or just ```
+-- Helper to strip markdown fences (e.g., ```lua, ```, etc.)
+local function clean_markdown_fences(line)
 	local cleaned = line:gsub("^```%w*", ""):gsub("^```", "")
-	if cleaned == "" and line ~= "" then
+	-- If the line was just a fence, return nil to skip it
+	if cleaned == "" then
 		return nil
-	end -- Skip the fence lines entirely
-	return line
+	end
+	return cleaned
+end
+
+-- Core function to run the CLI and stream to a buffer
+local function stream_to_buffer(cmd, target_buf, on_finish, line_processor)
+	local line_count = 0
+
+	-- Start the job
+	job.run(cmd, function(line)
+		-- Process line (strip fences or keep as is)
+		local content = line_processor and line_processor(line) or line
+
+		if content then
+			vim.schedule(function()
+				-- Clear "Thinking..." on first real content
+				if line_count == 0 then
+					vim.api.nvim_buf_set_lines(target_buf, 0, -1, false, {})
+				end
+				-- Append line efficiently
+				vim.api.nvim_buf_set_lines(target_buf, -1, -1, false, { content })
+				line_count = line_count + 1
+			end)
+		end
+	end, on_finish)
 end
 
 function M.ask(query, opts)
@@ -18,37 +41,24 @@ function M.ask(query, opts)
 	local use_all = opts.all or false
 	local current_file = vim.fn.expand("%:p")
 
-	-- 1. Build Command
+	-- Build Command
 	local cmd = { config.options.cmd, "ask", query, "--model", config.options.model }
-
 	if not use_all and current_file ~= "" then
 		table.insert(cmd, "--focus")
 		table.insert(cmd, current_file)
-		print("🔍 Asking about active file...")
+		print("🔍 Scanning active file...")
 	else
-		print("🌍 Asking about codebase...")
+		print("🌍 Scanning codebase...")
 	end
 
-	-- 2. Setup UI
+	-- Setup UI
 	local buf = ui.create_scratch_buf("markdown")
 	ui.open_split(buf)
-
-	-- Write initial loading state
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Thinking..." })
 
-	-- 3. Run Job
-	local line_count = 0
-	job.run(cmd, function(line)
-		-- On first valid line, clear "Thinking..."
-		if line_count == 0 then
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
-		end
-
-		-- Append line safely
-		vim.api.nvim_buf_set_lines(buf, -1, -1, false, { line })
-		line_count = line_count + 1
-	end, function()
-		print("✅ Done.")
+	-- Run
+	stream_to_buffer(cmd, buf, function()
+		print("✅ Query complete.")
 	end)
 end
 
@@ -62,9 +72,9 @@ function M.refactor(instruction)
 		return
 	end
 
-	-- 1. Build Command
+	-- Build Strict Prompt
 	local strict_prompt = string.format(
-		"Refactor file: %s.\nINSTRUCTION: %s\nCRITICAL: Output ONLY valid code. No markdown fences. No conversational text.",
+		"Refactor file: %s.\nINSTRUCTION: %s\nCRITICAL: Output ONLY valid code. No markdown. No text.",
 		current_file,
 		instruction
 	)
@@ -79,27 +89,17 @@ function M.refactor(instruction)
 		current_file,
 	}
 
-	-- 2. Setup UI
+	-- Setup UI
 	local new_buf = ui.create_scratch_buf(filetype)
 	ui.open_split(new_buf)
-	vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, { "Generating code..." })
+	vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, { "Generating..." })
 
-	-- 3. Run Job
-	local line_count = 0
-	job.run(cmd, function(line)
-		local cleaned = clean_line(line)
-		if cleaned then
-			if line_count == 0 then
-				vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, {})
-			end
-			vim.api.nvim_buf_set_lines(new_buf, -1, -1, false, { cleaned })
-			line_count = line_count + 1
-		end
-	end, function()
-		-- 4. Enable Diff View on finish
+	-- Run with Fence Cleaning
+	stream_to_buffer(cmd, new_buf, function()
+		-- On finish, setup Diff View
 		ui.setup_diff_view(current_buf, new_buf)
-		print("✅ Review changes: <C-Enter> to accept.")
-	end)
+		print("✅ Review ready: " .. config.options.keymaps.accept .. " to accept.")
+	end, clean_markdown_fences)
 end
 
 function M.setup(opts)
