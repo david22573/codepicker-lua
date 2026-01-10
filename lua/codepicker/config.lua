@@ -1,18 +1,23 @@
 local M = {}
 
 M.defaults = {
+	-- The binary name or full path to your Go tool
 	cmd = "codepicker",
+	-- The model to use on OpenRouter
 	model = "xiaomi/mimo-v2-flash:free",
-	ui = {
+	-- Edit mode settings
+	edit = {
+		-- Automatically open diff view after generation?
 		diff_view = true,
-		wrap = true,
 	},
-	keymaps = {
-		accept = "<C-CR>",
-		decline = "<C-BS>",
+	-- Keymaps for the Review/Diff window
+	mappings = {
+		accept = "<C-CR>", -- Accept change
+		decline = "<C-BS>", -- Decline/Close
 	},
 }
 
+-- Allow user to override config via setup()
 M.options = vim.deepcopy(M.defaults)
 
 function M.setup(opts)
