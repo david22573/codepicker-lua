@@ -325,6 +325,8 @@ function M.refactor(instruction)
 		log.error("Save the file first before refactoring")
 		return
 	end
+	-- FIX 1: Auto-save buffer so the tool reads the actual current content
+	vim.cmd("update")
 	log.info("Refactor instruction: " .. instruction)
 	local src_buf = vim.api.nvim_get_current_buf()
 	local filetype = vim.bo[src_buf].filetype
@@ -405,7 +407,7 @@ CRITICAL REQUIREMENTS:
 			model = config.options.model,
 			focus = current_file,
 		})
-		local chunks = {}
+		-- FIX 2: Stream lines directly to buffer
 		local request_job = job.run({
 			"curl",
 			"-s",
@@ -419,7 +421,17 @@ CRITICAL REQUIREMENTS:
 			"-d",
 			payload,
 		}, function(line)
-			table.insert(chunks, line)
+			-- Streaming callback
+			vim.schedule(function()
+				if not vim.api.nvim_buf_is_valid(dst_buf) then
+					return
+				end
+				-- Filter out markdown fences if the model disobeys instructions,
+				-- but preserve empty lines
+				if not line:match("^```") then
+					vim.api.nvim_buf_set_lines(dst_buf, -1, -1, false, { line })
+				end
+			end)
 		end, function(code)
 			active_requests[dst_buf] = nil
 			vim.schedule(function()
@@ -430,9 +442,7 @@ CRITICAL REQUIREMENTS:
 					ui.append_text(dst_buf, "\n❌ Request failed with code: " .. code)
 					return
 				end
-				-- Set buffer content
-				vim.api.nvim_buf_set_lines(dst_buf, 4, -1, false, chunks)
-				-- Scroll to top
+				-- Final UI polish
 				vim.api.nvim_buf_call(dst_buf, function()
 					vim.cmd("normal! gg")
 				end)
@@ -481,10 +491,9 @@ function M.run(cmd, on_line, on_exit)
 				local idx = buffer:find("\n")
 				local line = buffer:sub(1, idx - 1)
 				buffer = buffer:sub(idx + 1)
-				-- Filter out markdown code fences and empty lines
-				if line ~= "" and not line:match("^```") then
-					on_line(line)
-				end
+				-- FIX: Pass all lines through.
+				-- Logic for filtering fences/empty lines belongs in the consumer (init.lua), not here.
+				on_line(line)
 			end
 		end,
 		on_stderr = function(_, data)
@@ -497,7 +506,6 @@ function M.run(cmd, on_line, on_exit)
 				end
 			end
 		end,
-		-- FIX BELOW: Change "_" to "id" to capture the job ID provided by Neovim
 		on_exit = function(id, code)
 			-- Flush remaining buffer
 			if buffer ~= "" then
