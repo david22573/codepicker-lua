@@ -1,69 +1,99 @@
 local M = {}
 
--- Stream Parser to handle partial chunks and strip CLI noise
-local function create_stream_handler(on_line)
-	local buffer = ""
-	-- Known noise lines from the Go tool to ignore
-	local ignore_patterns = {
-		"^%s*🤖 AI Response:",
-		"^%s*─+$", -- Matches the separator line "──────"
-		"^%s*Context generated:", -- Optional status log from CLI
-	}
+-- Active jobs registry for cleanup
+local active_jobs = {}
 
-	return function(data)
-		if not data then
-			return
-		end
-
-		-- Neovim sends a table of strings (chunks).
-		-- The last item is usually partial, or empty if stream ended cleanly.
-		for i, chunk in ipairs(data) do
-			buffer = buffer .. chunk
-			if i < #data then
-				-- We have a newline, process the line
-				local lines = vim.split(buffer, "\n")
-				for j = 1, #lines - 1 do
-					local line = lines[j]
-
-					-- Check if line is "noise"
-					local is_noise = false
-					for _, pat in ipairs(ignore_patterns) do
-						if line:match(pat) then
-							is_noise = true
-							break
-						end
-					end
-
-					if not is_noise then
-						on_line(line)
-					end
-				end
-				-- The last part is the new partial buffer
-				buffer = lines[#lines]
-			end
-		end
-	end
+-- Lazy load log to avoid circular dependency
+local function get_log()
+	return require("codepicker.log")
 end
 
-function M.run(cmd, on_chunk, on_exit)
-	local stdout_handler = create_stream_handler(on_chunk)
-
+function M.run(cmd, on_line, on_exit)
+	local buffer = ""
+	-- We don't need to rely on the return variable for the callback anymore
 	local job_id = vim.fn.jobstart(cmd, {
 		stdout_buffered = false,
+		stderr_buffered = false,
 		on_stdout = function(_, data)
-			stdout_handler(data)
+			if not data then
+				return
+			end
+
+			-- Concatenate all chunks
+			for _, chunk in ipairs(data) do
+				if chunk ~= "" then
+					buffer = buffer .. chunk
+				end
+			end
+
+			-- Process complete lines only
+			while buffer:find("\n") do
+				local idx = buffer:find("\n")
+				local line = buffer:sub(1, idx - 1)
+				buffer = buffer:sub(idx + 1)
+
+				-- Filter out markdown code fences and empty lines
+				if line ~= "" and not line:match("^```") then
+					on_line(line)
+				end
+			end
 		end,
-		on_exit = function()
+		on_stderr = function(_, data)
+			if not data then
+				return
+			end
+			for _, chunk in ipairs(data) do
+				if chunk ~= "" then
+					get_log().error("Job stderr: " .. chunk)
+				end
+			end
+		end,
+		-- FIX BELOW: Change "_" to "id" to capture the job ID provided by Neovim
+		on_exit = function(id, code)
+			-- Flush remaining buffer
+			if buffer ~= "" then
+				on_line(buffer)
+			end
+
+			-- Cleanup: Use 'id' instead of 'job_id'
+			active_jobs[id] = nil
+
+			if code ~= 0 then
+				get_log().error("Job exited with code: " .. code)
+			else
+				get_log().debug("Job completed successfully")
+			end
+
 			if on_exit then
-				on_exit()
+				on_exit(code)
 			end
 		end,
 	})
 
 	if job_id <= 0 then
-		print("❌ Failed to start codepicker job")
+		get_log().error("Failed to start job")
+		return nil
 	end
+
+	active_jobs[job_id] = true
+	get_log().debug("Started job: " .. job_id)
 	return job_id
+end
+
+function M.stop(job_id)
+	if job_id and active_jobs[job_id] then
+		vim.fn.jobstop(job_id)
+		active_jobs[job_id] = nil
+		get_log().debug("Stopped job: " .. job_id)
+	end
+end
+
+function M.stop_all()
+	for job_id, _ in pairs(active_jobs) do
+		vim.fn.jobstop(job_id)
+	end
+	active_jobs = {}
+	get_log().debug("Stopped all jobs")
 end
 
 return M
