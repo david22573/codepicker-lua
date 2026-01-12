@@ -1,12 +1,11 @@
 local M = {}
-
 M.defaults = {
 	cmd = "codepicker",
 	model = nil,
 	port = 22573,
 	timeout = {
-		server_start = 5000, -- ms to wait for server
-		request = 30000, -- ms to wait for response
+		server_start = 60000, -- ms to wait for server
+		request = 60000, -- INCREASED: 60s (was 30000) to allow for longer generation times
 	},
 	mappings = {
 		accept = "<C-CR>",
@@ -18,18 +17,14 @@ M.defaults = {
 		progress_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
 	},
 }
-
 M.options = vim.deepcopy(M.defaults)
-
 function M.setup(opts)
 	opts = opts or {}
-
 	-- Validate port
 	if opts.port and (opts.port < 1024 or opts.port > 65535) then
 		vim.notify("Invalid port number, using default: " .. M.defaults.port, vim.log.levels.WARN)
 		opts.port = nil
 	end
-
 	-- Validate mappings
 	if opts.mappings then
 		for k, v in pairs(opts.mappings) do
@@ -39,7 +34,6 @@ function M.setup(opts)
 			end
 		end
 	end
-
 	-- Validate timeout values
 	if opts.timeout then
 		if opts.timeout.server_start and opts.timeout.server_start < 100 then
@@ -51,8 +45,6 @@ function M.setup(opts)
 			opts.timeout.request = nil
 		end
 	end
-
 	M.options = vim.tbl_deep_extend("force", M.defaults, opts)
 end
-
 return M

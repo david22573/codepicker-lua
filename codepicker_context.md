@@ -44,8 +44,8 @@ M.defaults = {
 	model = nil,
 	port = 22573,
 	timeout = {
-		server_start = 5000, -- ms to wait for server
-		request = 30000, -- ms to wait for response
+		server_start = 60000, -- ms to wait for server
+		request = 60000, -- INCREASED: 60s (was 30000) to allow for longer generation times
 	},
 	mappings = {
 		accept = "<C-CR>",
@@ -194,10 +194,18 @@ local ui = require("codepicker.ui")
 local log = require("codepicker.log")
 -- Track active requests for cleanup
 local active_requests = {}
--- Setup function to be called by user
+-- Helper: Get text from visual selection
+local function get_visual_selection()
+	local _, csrow, _, _ = unpack(vim.fn.getpos("'<"))
+	local _, cerow, _, _ = unpack(vim.fn.getpos("'>"))
+	if csrow > cerow then
+		csrow, cerow = cerow, csrow
+	end
+	local lines = vim.api.nvim_buf_get_lines(0, csrow - 1, cerow, false)
+	return table.concat(lines, "\n"), csrow - 1, cerow
+end
 function M.setup(opts)
 	config.setup(opts)
-	-- Auto-start server on first use
 	vim.api.nvim_create_autocmd("VimEnter", {
 		once = true,
 		callback = function()
@@ -206,7 +214,6 @@ function M.setup(opts)
 			end
 		end,
 	})
-	-- Cleanup on exit
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		callback = function()
 			log.debug("Cleaning up on exit")
@@ -214,7 +221,6 @@ function M.setup(opts)
 			server.stop()
 		end,
 	})
-	-- Buffer cleanup
 	vim.api.nvim_create_autocmd("BufDelete", {
 		callback = function(args)
 			local buf = args.buf
@@ -225,29 +231,19 @@ function M.setup(opts)
 		end,
 	})
 end
--- Ask: Stream AI response to a markdown buffer
 function M.ask(query, opts)
 	opts = opts or {}
-	-- Validate input
 	if not query or vim.trim(query) == "" then
 		log.error("Query cannot be empty")
 		return
 	end
-	log.info("Ask query: " .. query)
-	-- Create UI buffer
 	local buf = ui.create_scratch_buf("markdown")
-	if not buf then
-		log.error("Failed to create buffer")
-		return
-	end
 	local win = ui.open_split(buf)
-	if not win then
-		log.error("Failed to open split")
+	if not buf or not win then
+		log.error("Failed to create UI")
 		return
 	end
-	-- Show initial loading message
 	local progress_timer = ui.show_progress(buf, "Thinking...")
-	-- Start server
 	if not server.start() then
 		if progress_timer then
 			progress_timer:stop()
@@ -256,35 +252,31 @@ function M.ask(query, opts)
 		ui.append_text(buf, "\n❌ Failed to start server")
 		return
 	end
-	-- Wait for server to be ready
 	server.wait_ready(function(ready)
 		if progress_timer then
 			progress_timer:stop()
 			progress_timer:close()
 		end
 		if not ready then
-			ui.append_text(buf, "\n❌ Server failed to start. Try :CodePickerStatus for details.")
+			ui.append_text(buf, "\n❌ Server failed to start")
 			return
 		end
-		-- Clear loading message
-		if vim.api.nvim_buf_is_valid(buf) then
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
-		end
-		-- Prepare request
-		local current_file = vim.fn.expand("%:p")
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
 		local payload = vim.fn.json_encode({
 			query = query,
 			model = config.options.model,
-			focus = current_file ~= "" and current_file or nil,
+			focus = vim.fn.expand("%:p"),
 			overwrite = opts.overwrite or false,
 		})
-		log.debug("Sending request to " .. server.url("/ask"))
-		-- Make request
+		-- FIX: Calculate timeout in seconds
+		local timeout_sec = math.ceil(config.options.timeout.request / 1000)
 		local request_job = job.run({
 			"curl",
 			"-s",
 			"-N",
 			"--no-buffer",
+			"--max-time",
+			tostring(timeout_sec), -- FIX: Added timeout flag
 			"-H",
 			"Content-Type: application/json",
 			"-X",
@@ -296,123 +288,93 @@ function M.ask(query, opts)
 			ui.append_text(buf, line .. "\n")
 		end, function(code)
 			active_requests[buf] = nil
-			vim.schedule(function()
-				if vim.api.nvim_buf_is_valid(buf) then
-					if code == 0 then
-						ui.append_text(buf, "\n✅ Done.")
-					else
-						ui.append_text(buf, "\n❌ Request failed with code: " .. code)
-					end
-				end
-			end)
+			if code == 0 then
+				ui.append_text(buf, "\n✅ Done.")
+			elseif code == 28 then -- curl timeout code
+				ui.append_text(buf, "\n❌ Request timed out after " .. timeout_sec .. "s")
+			else
+				ui.append_text(buf, "\n❌ Request failed: " .. code)
+			end
 		end)
 		if request_job then
 			active_requests[buf] = request_job
-		else
-			ui.append_text(buf, "\n❌ Failed to start request")
 		end
 	end)
 end
--- Refactor: Generate code and show diff view
-function M.refactor(instruction)
-	-- Validate input
+function M.refactor(instruction, opts)
+	opts = opts or {}
 	if not instruction or vim.trim(instruction) == "" then
 		log.error("Instruction cannot be empty")
 		return
 	end
-	local current_file = vim.fn.expand("%:p")
-	if current_file == "" then
-		log.error("Save the file first before refactoring")
-		return
-	end
-	-- FIX 1: Auto-save buffer so the tool reads the actual current content
-	vim.cmd("update")
-	log.info("Refactor instruction: " .. instruction)
 	local src_buf = vim.api.nvim_get_current_buf()
 	local filetype = vim.bo[src_buf].filetype
-	-- Create destination buffer
+	vim.cmd("update")
+	local is_visual = opts.visual
+	if is_visual == nil then
+		local mode = vim.fn.mode()
+		is_visual = mode == "v" or mode == "V" or mode == "\22"
+	end
+	local code_context, start_line, end_line
+	if is_visual then
+		code_context, start_line, end_line = get_visual_selection()
+	else
+		start_line = 0
+		end_line = vim.api.nvim_buf_line_count(src_buf)
+		code_context = table.concat(vim.api.nvim_buf_get_lines(src_buf, 0, -1, false), "\n")
+	end
+	local system_prompt
+	if is_visual then
+		system_prompt = string.format(
+			[[You are a coding assistant.
+Task: Refactor a selection.
+Instruction: %s
+```%s
+%s
+```]],
+			instruction,
+			filetype,
+			code_context
+		)
+	else
+		system_prompt = string.format(
+			[[You are a coding assistant.
+Task: Rewrite entire file.
+Instruction: %s
+```%s
+%s
+```]],
+			instruction,
+			filetype,
+			code_context
+		)
+	end
 	local dst_buf = ui.create_scratch_buf(filetype)
-	if not dst_buf then
-		log.error("Failed to create buffer")
-		return
-	end
 	local dst_win = ui.open_split(dst_buf)
-	if not dst_win then
-		log.error("Failed to open split")
+	if not dst_buf or not dst_win then
+		log.error("Failed to create refactor UI")
 		return
 	end
-	-- Set buffer name
-	vim.api.nvim_buf_set_name(dst_buf, "[CodePicker] Refactored")
-	-- Add header
-	vim.api.nvim_buf_set_lines(dst_buf, 0, 0, false, {
-		"-- AI-generated refactored code",
-		"-- " .. config.options.mappings.accept .. " to accept changes",
-		"-- " .. config.options.mappings.decline .. " to discard",
-		"",
-	})
+	vim.api.nvim_buf_set_name(dst_buf, "[CodePicker] Refactor")
 	local progress_timer = ui.show_progress(dst_buf, "Generating code...")
-	-- Setup keymaps for accept/decline
-	local opts = { noremap = true, silent = true, buffer = dst_buf }
-	vim.keymap.set("n", config.options.mappings.accept, function()
-		local new_lines = vim.api.nvim_buf_get_lines(dst_buf, 4, -1, false) -- Skip header
-		vim.api.nvim_buf_set_lines(src_buf, 0, -1, false, new_lines)
-		vim.cmd("diffoff!")
-		vim.api.nvim_buf_delete(dst_buf, { force = true })
-		vim.cmd("update")
-		if #vim.lsp.get_active_clients({ bufnr = src_buf }) > 0 then
-			vim.lsp.buf.format({ async = false })
-		end
-		print("✅ Changes applied")
-	end, opts)
-	vim.keymap.set("n", config.options.mappings.decline, function()
-		vim.cmd("diffoff!")
-		vim.api.nvim_buf_delete(dst_buf, { force = true })
-		print("❌ Changes discarded")
-	end, opts)
-	-- Start server
-	if not server.start() then
-		if progress_timer then
-			progress_timer:stop()
-			progress_timer:close()
-		end
-		ui.append_text(dst_buf, "\n❌ Failed to start server")
-		return
-	end
 	server.wait_ready(function(ready)
 		if progress_timer then
 			progress_timer:stop()
 			progress_timer:close()
 		end
 		if not ready then
-			ui.append_text(dst_buf, "\n❌ Server failed to start")
 			return
 		end
-		-- Clear header for actual code
-		vim.api.nvim_buf_set_lines(dst_buf, 4, -1, false, {})
-		-- Enhanced prompt
-		local prompt = string.format(
-			[[You are an expert coding assistant.
-Task: Rewrite the following file to satisfy the instruction.
-Instruction: %s
-CRITICAL REQUIREMENTS:
-1. Output the COMPLETE file content - do not stop early or truncate
-2. Do NOT use placeholders like "// ... rest of code ..." or "// ... existing code ..."
-3. Preserve the existing code structure and style
-4. Output ONLY the code - no markdown, no explanations, no code fences
-5. Every line of the original file should be represented in your output]],
-			instruction
-		)
-		local payload = vim.fn.json_encode({
-			query = prompt,
-			model = config.options.model,
-			focus = current_file,
-		})
-		-- FIX 2: Stream lines directly to buffer
-		local request_job = job.run({
+		-- FIX: Calculate timeout in seconds
+		local timeout_sec = math.ceil(config.options.timeout.request / 1000)
+		local payload = vim.fn.json_encode({ query = system_prompt })
+		job.run({
 			"curl",
 			"-s",
 			"-N",
 			"--no-buffer",
+			"--max-time",
+			tostring(timeout_sec), -- FIX: Added timeout flag
 			"-H",
 			"Content-Type: application/json",
 			"-X",
@@ -421,41 +383,10 @@ CRITICAL REQUIREMENTS:
 			"-d",
 			payload,
 		}, function(line)
-			-- Streaming callback
-			vim.schedule(function()
-				if not vim.api.nvim_buf_is_valid(dst_buf) then
-					return
-				end
-				-- Filter out markdown fences if the model disobeys instructions,
-				-- but preserve empty lines
-				if not line:match("^```") then
-					vim.api.nvim_buf_set_lines(dst_buf, -1, -1, false, { line })
-				end
-			end)
-		end, function(code)
-			active_requests[dst_buf] = nil
-			vim.schedule(function()
-				if not vim.api.nvim_buf_is_valid(dst_buf) then
-					return
-				end
-				if code ~= 0 then
-					ui.append_text(dst_buf, "\n❌ Request failed with code: " .. code)
-					return
-				end
-				-- Final UI polish
-				vim.api.nvim_buf_call(dst_buf, function()
-					vim.cmd("normal! gg")
-				end)
-				-- Enable diff mode
-				vim.cmd("windo diffthis")
-				print("✨ Code generated. Review and accept/decline changes.")
-			end)
+			if not line:match("^```") then
+				vim.api.nvim_buf_set_lines(dst_buf, -1, -1, false, { line })
+			end
 		end)
-		if request_job then
-			active_requests[dst_buf] = request_job
-		else
-			ui.append_text(dst_buf, "\n❌ Failed to start request")
-		end
 	end)
 end
 return M
@@ -899,132 +830,34 @@ local config = require("codepicker.config")
 local server = require("codepicker.server")
 local log = require("codepicker.log")
 local job = require("codepicker.job")
--- Initialize with defaults
 config.setup()
--- Command: :CodePickerAsk "Query"
 vim.api.nvim_create_user_command("CodePickerAsk", function(opts)
 	local args = vim.trim(opts.args)
 	if args == "" then
-		vim.notify("❌ Please provide a query.", vim.log.levels.ERROR)
+		vim.notify("❌ Please provide a query", vim.log.levels.ERROR)
 		return
 	end
-	local options = {
-		overwrite = false,
-	}
-	-- Parse -y flag (overwrite context)
-	if args:match("%-y") then
-		options.overwrite = true
-		args = args:gsub("%-y%s*", "")
-		args = vim.trim(args)
-	end
-	codepicker.ask(args, options)
-end, {
-	nargs = "+",
-	desc = "Ask AI about the codebase",
-	complete = function(_, line)
-		-- Simple completion suggestions
-		local suggestions = {
-			"explain this code",
-			"how does this work",
-			"find bugs in this file",
-			"suggest improvements",
-			"add documentation",
-		}
-		return suggestions
-	end,
-})
--- Command: :CodePickerEdit "Instructions"
+	codepicker.ask(args, {})
+end, { nargs = "+" })
 vim.api.nvim_create_user_command("CodePickerEdit", function(opts)
 	local args = vim.trim(opts.args)
 	if args == "" then
-		vim.notify("❌ Please provide refactoring instructions.", vim.log.levels.ERROR)
+		vim.notify("❌ Please provide instructions", vim.log.levels.ERROR)
 		return
 	end
-	codepicker.refactor(args)
-end, {
-	nargs = "+",
-	desc = "Refactor current file with AI",
-	complete = function(_, line)
-		local suggestions = {
-			"add error handling",
-			"add comments",
-			"optimize performance",
-			"add type annotations",
-			"simplify this code",
-			"add unit tests",
-		}
-		return suggestions
-	end,
-})
--- Command: :CodePickerStatus - Check daemon status
+	codepicker.refactor(args, { visual = opts.range > 0 })
+end, { nargs = "+", range = true })
 vim.api.nvim_create_user_command("CodePickerStatus", function()
 	if server.is_running() then
-		local uptime = server.get_uptime()
-		print(string.format("✅ Server running (uptime: %.1fs) at %s", uptime, server.url("/ask")))
-		-- Run health check
-		server.wait_ready(function(healthy)
-			vim.schedule(function()
-				if healthy then
-					print("✅ Health check passed")
-				else
-					print("⚠️  Health check failed - server may not be responding")
-				end
-			end)
-		end, 2000)
+		print("✅ Server running")
 	else
-		print("❌ Server not running. It will start automatically on first use.")
+		print("❌ Server not running")
 	end
-end, {
-	desc = "Check codepicker server status",
-})
--- Command: :CodePickerRestart - Restart daemon
-vim.api.nvim_create_user_command("CodePickerRestart", function()
-	print("🔄 Restarting server...")
-	server.stop()
-	vim.defer_fn(function()
-		if server.start() then
-			print("✅ Server restarted successfully")
-		else
-			print("❌ Failed to restart server")
-		end
-	end, 500)
-end, {
-	desc = "Restart codepicker server",
-})
--- Command: :CodePickerLogs - View logs
-vim.api.nvim_create_user_command("CodePickerLogs", function()
-	local log_path = log.get_log_path()
-	if vim.fn.filereadable(log_path) == 0 then
-		print("No logs found at: " .. log_path)
-		return
-	end
-	vim.cmd("split " .. log_path)
-	vim.bo.buftype = "nofile"
-	vim.bo.bufhidden = "wipe"
-	vim.bo.swapfile = false
-	-- Auto-scroll to bottom
-	vim.cmd("normal! G")
-end, {
-	desc = "View codepicker logs",
-})
--- Command: :CodePickerClearLogs - Clear logs
-vim.api.nvim_create_user_command("CodePickerClearLogs", function()
-	log.clear()
-	print("✅ Logs cleared")
-end, {
-	desc = "Clear codepicker logs",
-})
--- Command: :CodePickerStop - Stop server
+end, {})
 vim.api.nvim_create_user_command("CodePickerStop", function()
-	if server.is_running() then
-		server.stop()
-		job.stop_all()
-		print("🛑 Server stopped")
-	else
-		print("Server is not running")
-	end
-end, {
-	desc = "Stop codepicker server",
-})
+	server.stop()
+	job.stop_all()
+	print("🛑 Server stopped")
+end, {})
 ```
 
