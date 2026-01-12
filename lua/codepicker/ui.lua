@@ -33,6 +33,40 @@ function M.open_split(buf)
 	return win
 end
 
+-- Create a floating window at cursor position
+function M.create_float_at_cursor(buf)
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then
+        return nil
+    end
+
+    local width = math.min(vim.o.columns - 4, 80)
+    local height = math.min(vim.o.lines - 4, 20)
+    
+    -- Calculate position relative to cursor
+    -- We'll try to position it below the cursor, but flip up if near bottom
+    local opts = {
+        relative = "cursor",
+        row = 1,
+        col = 0,
+        width = width,
+        height = height,
+        style = "minimal",
+        border = "rounded",
+        title = " ≡ƒñû CodePicker Ghost ",
+        title_pos = "center",
+    }
+
+    local win = vim.api.nvim_open_win(buf, true, opts)
+    
+    -- Set some window options for code readability
+    vim.wo[win].wrap = true
+    vim.wo[win].linebreak = true
+    vim.wo[win].conceallevel = 2 -- Hide markdown syntax if possible
+    vim.wo[win].foldenable = false
+    
+    return win
+end
+
 -- Show progress indicator
 function M.show_progress(buf, message)
 	if not buf or not vim.api.nvim_buf_is_valid(buf) then

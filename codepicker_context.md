@@ -36,7 +36,7 @@ ai:
 Neovim codepicker extension for agentic IDE experience 
 ```
 
-## File: lua/codepicker/config.lua
+## File: lua\codepicker\config.lua
 ```lua
 local M = {}
 M.defaults = {
@@ -90,7 +90,7 @@ end
 return M
 ```
 
-## File: lua/codepicker/health.lua
+## File: lua\codepicker\health.lua
 ```lua
 local M = {}
 local health = vim.health or require("health")
@@ -184,7 +184,7 @@ end
 return M
 ```
 
-## File: lua/codepicker/init.lua
+## File: lua\codepicker\init.lua
 ```lua
 local M = {}
 local config = require("codepicker.config")
@@ -392,7 +392,7 @@ end
 return M
 ```
 
-## File: lua/codepicker/job.lua
+## File: lua\codepicker\job.lua
 ```lua
 local M = {}
 -- Active jobs registry for cleanup
@@ -479,7 +479,7 @@ end
 return M
 ```
 
-## File: lua/codepicker/log.lua
+## File: lua\codepicker\log.lua
 ```lua
 local M = {}
 local log_file = vim.fn.stdpath("cache") .. "/codepicker.log"
@@ -523,8 +523,9 @@ end
 return M
 ```
 
-## File: lua/codepicker/server.lua
+## File: lua\codepicker\server.lua
 ```lua
+-- lua/codepicker/server.lua
 local M = {}
 local config = require("codepicker.config")
 local log = require("codepicker.log")
@@ -553,6 +554,7 @@ function M.start()
 		on_stderr = function(_, data)
 			for _, line in ipairs(data) do
 				if line ~= "" then
+					-- FIX: Log as INFO/WARN so you can see startup errors even if debug=false
 					log.warn("Server stderr: " .. line)
 				end
 			end
@@ -599,7 +601,8 @@ function M.get_uptime()
 	return (vim.loop.now() - start_time) / 1000
 end
 function M.url(path)
-	return string.format("http://localhost:%d%s", config.options.port, path)
+	-- FIX: Use 127.0.0.1 instead of localhost to avoid IPv6 resolution timeouts
+	return string.format("http://127.0.0.1:%d%s", config.options.port, path)
 end
 function M.wait_ready(cb, timeout)
 	timeout = timeout or config.options.timeout.server_start
@@ -674,7 +677,7 @@ end
 return M
 ```
 
-## File: lua/codepicker/ui.lua
+## File: lua\codepicker\ui.lua
 ```lua
 local M = {}
 local config = require("codepicker.config")
@@ -819,7 +822,7 @@ end
 return M
 ```
 
-## File: plugin/codepicker.lua
+## File: plugin\codepicker.lua
 ```lua
 if vim.g.loaded_codepicker then
 	return
