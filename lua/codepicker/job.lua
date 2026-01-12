@@ -32,13 +32,16 @@ function M.run(cmd, on_line, on_exit)
 				on_line(line)
 			end
 		end,
-		on_stderr = function(_, data)
+on_stderr = function(_, data)
 			if not data then
 				return
 			end
 			for _, chunk in ipairs(data) do
-				if chunk ~= "" then
-					get_log().error("Job stderr: " .. chunk)
+				-- FIX: Check for empty strings and use debug() instead of error()
+				if chunk ~= "" and vim.trim(chunk) ~= "" then
+					-- Using debug() writes to the log file but DOES NOT trigger a notification
+					-- This prevents the "Press ENTER" wall of text
+					get_log().debug("CLI progress: " .. chunk)
 				end
 			end
 		end,
