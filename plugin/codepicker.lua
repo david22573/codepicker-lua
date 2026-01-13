@@ -8,6 +8,7 @@ local config = require("codepicker.config")
 local server = require("codepicker.server")
 local log = require("codepicker.log")
 local job = require("codepicker.job")
+local ghost = require("codepicker.ghost")
 
 config.setup()
 
