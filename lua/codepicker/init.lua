@@ -4,8 +4,9 @@ local server = require("codepicker.server")
 local job = require("codepicker.job")
 local ui = require("codepicker.ui")
 local log = require("codepicker.log")
--- Track active requests for cleanup
-local active_requests = {}
+local agent = require("codepicker.agent")
+local memory = require("codepicker.memory")
+
 -- Helper: Get text from visual selection
 local function get_visual_selection()
 	local _, csrow, _, _ = unpack(vim.fn.getpos("'<"))
@@ -14,18 +15,27 @@ local function get_visual_selection()
 		csrow, cerow = cerow, csrow
 	end
 	local lines = vim.api.nvim_buf_get_lines(0, csrow - 1, cerow, false)
-	return table.concat(lines, "\n"), csrow - 1, cerow
+	return table.concat(lines, "\n")
 end
+
 function M.setup(opts)
 	config.setup(opts)
+
+	-- Auto-start Server
 	vim.api.nvim_create_autocmd("VimEnter", {
 		once = true,
 		callback = function()
 			if config.options.auto_start ~= false then
 				log.debug("Auto-starting server")
+				-- We ensure the server is ready before we need it
+				if not server.is_running() then
+					server.start()
+				end
 			end
 		end,
 	})
+
+	-- Cleanup on Exit
 	vim.api.nvim_create_autocmd("VimLeavePre", {
 		callback = function()
 			log.debug("Cleaning up on exit")
@@ -33,176 +43,81 @@ function M.setup(opts)
 			server.stop()
 		end,
 	})
-	vim.api.nvim_create_autocmd("BufDelete", {
-		callback = function(args)
-			local buf = args.buf
-			if active_requests[buf] then
-				job.stop(active_requests[buf])
-				active_requests[buf] = nil
-			end
-		end,
-	})
+
+	-- Register Commands
+	M.register_commands()
 end
-function M.ask(query, opts)
-	opts = opts or {}
-	if not query or vim.trim(query) == "" then
-		log.error("Query cannot be empty")
-		return
-	end
-	local buf = ui.create_scratch_buf("markdown")
-	local win = ui.open_split(buf)
-	if not buf or not win then
-		log.error("Failed to create UI")
-		return
-	end
-	local progress_timer = ui.show_progress(buf, "Thinking...")
-	if not server.start() then
-		if progress_timer then
-			progress_timer:stop()
-			progress_timer:close()
-		end
-		ui.append_text(buf, "\n❌ Failed to start server")
-		return
-	end
-	server.wait_ready(function(ready)
-		if progress_timer then
-			progress_timer:stop()
-			progress_timer:close()
-		end
-		if not ready then
-			ui.append_text(buf, "\n❌ Server failed to start")
+
+function M.register_commands()
+	-- 1. General Task (The main entry point)
+	vim.api.nvim_create_user_command("CodePickerTask", function(opts)
+		local args = vim.trim(opts.args)
+		if args == "" then
+			print("❌ Please provide a task")
 			return
 		end
-		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
-		local payload = vim.fn.json_encode({
-			query = query,
-			model = config.options.model,
-			focus = vim.fn.expand("%:p"),
-			overwrite = opts.overwrite or false,
-		})
+		agent.run_task(args)
+	end, { nargs = "+" })
 
-		-- FIX: Calculate timeout in seconds
-		local timeout_sec = math.ceil(config.options.timeout.request / 1000)
+	-- 2. Context Management (Memory)
+	vim.api.nvim_create_user_command("CodePickerAdd", function()
+		memory.add_current_file()
+	end, {})
 
-		local request_job = job.run({
-			"curl",
-			"-s",
-			"-N",
-			"--no-buffer",
-			"--max-time",
-			tostring(timeout_sec), -- FIX: Added timeout flag
-			"-H",
-			"Content-Type: application/json",
-			"-X",
-			"POST",
-			server.url("/ask"),
-			"-d",
-			payload,
-		}, function(line)
-			ui.append_text(buf, line .. "\n")
-		end, function(code)
-			active_requests[buf] = nil
-			if code == 0 then
-				ui.append_text(buf, "\n✅ Done.")
-			elseif code == 28 then -- curl timeout code
-				ui.append_text(buf, "\n❌ Request timed out after " .. timeout_sec .. "s")
-			else
-				ui.append_text(buf, "\n❌ Request failed: " .. code)
-			end
-		end)
-		if request_job then
-			active_requests[buf] = request_job
-		end
-	end)
+	vim.api.nvim_create_user_command("CodePickerDrop", function()
+		memory.remove_current_file()
+	end, {})
+
+	vim.api.nvim_create_user_command("CodePickerContext", function()
+		memory.show_context()
+	end, {})
+
+	-- 3. Legacy Wrappers (Redirected to Agent)
+	vim.api.nvim_create_user_command("CodePickerAsk", function(opts)
+		M.ask(opts.args)
+	end, { nargs = "+" })
+
+	vim.api.nvim_create_user_command("CodePickerEdit", function(opts)
+		M.refactor(opts.args, { visual = opts.range > 0 })
+	end, { nargs = "+", range = true })
 end
+
+-- Wrapper: Sends a simple question to the Agent
+function M.ask(query)
+	-- We just treat a question as a task that doesn't need to write files
+	agent.run_task("Question: " .. query)
+end
+
+-- Wrapper: Wraps code selection + instruction and sends to Agent
 function M.refactor(instruction, opts)
 	opts = opts or {}
-	if not instruction or vim.trim(instruction) == "" then
-		log.error("Instruction cannot be empty")
-		return
-	end
 	local src_buf = vim.api.nvim_get_current_buf()
 	local filetype = vim.bo[src_buf].filetype
-	vim.cmd("update")
-	local is_visual = opts.visual
-	if is_visual == nil then
-		local mode = vim.fn.mode()
-		is_visual = mode == "v" or mode == "V" or mode == "\22"
-	end
-	local code_context, start_line, end_line
-	if is_visual then
-		code_context, start_line, end_line = get_visual_selection()
+	local code_context = ""
+
+	-- Get content (Visual or Whole File)
+	if opts.visual then
+		code_context = get_visual_selection()
 	else
-		start_line = 0
-		end_line = vim.api.nvim_buf_line_count(src_buf)
 		code_context = table.concat(vim.api.nvim_buf_get_lines(src_buf, 0, -1, false), "\n")
 	end
-	local system_prompt
-	if is_visual then
-		system_prompt = string.format(
-			[[You are a coding assistant.
-Task: Refactor a selection.
+
+	-- Construct a task prompt for the Agent
+	local prompt = string.format(
+		[[I need you to refactor the following %s code.
 Instruction: %s
+
+Code:
 ```%s
 %s
-```]],
-			instruction,
-			filetype,
-			code_context
-		)
-	else
-		system_prompt = string.format(
-			[[You are a coding assistant.
-Task: Rewrite entire file.
-Instruction: %s
-```%s
-%s
-```]],
-			instruction,
-			filetype,
-			code_context
-		)
-	end
-	local dst_buf = ui.create_scratch_buf(filetype)
-	local dst_win = ui.open_split(dst_buf)
-	if not dst_buf or not dst_win then
-		log.error("Failed to create refactor UI")
-		return
-	end
-	vim.api.nvim_buf_set_name(dst_buf, "[CodePicker] Refactor")
-	local progress_timer = ui.show_progress(dst_buf, "Generating code...")
-	server.wait_ready(function(ready)
-		if progress_timer then
-			progress_timer:stop()
-			progress_timer:close()
-		end
-		if not ready then
-			return
-		end
 
-		-- FIX: Calculate timeout in seconds
-		local timeout_sec = math.ceil(config.options.timeout.request / 1000)
-
-		local payload = vim.fn.json_encode({ query = system_prompt })
-		job.run({
-			"curl",
-			"-s",
-			"-N",
-			"--no-buffer",
-			"--max-time",
-			tostring(timeout_sec), -- FIX: Added timeout flag
-			"-H",
-			"Content-Type: application/json",
-			"-X",
-			"POST",
-			server.url("/ask"),
-			"-d",
-			payload,
-		}, function(line)
-			if not line:match("^```") then
-				vim.api.nvim_buf_set_lines(dst_buf, -1, -1, false, { line })
-			end
-		end)
-	end)
+If you change the code, use the 'write_shadow_file' tool to output the new version so I can review it.]],
+		filetype,
+		instruction,
+		filetype,
+		code_context
+	)
+	-- Send to Agent
+	agent.run_task(prompt)
 end
 return M
