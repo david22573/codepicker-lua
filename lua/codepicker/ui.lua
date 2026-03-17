@@ -107,6 +107,21 @@ function M.append_text(buf, text)
 			return
 		end
 
+		-- Find the window showing this buffer
+		local wins = vim.fn.win_findbuf(buf)
+		local win = #wins > 0 and wins[1] or nil
+		local should_scroll = false
+
+		-- CHECK: Is the user currently at the bottom?
+		if win then
+			local cursor_row = vim.api.nvim_win_get_cursor(win)[1]
+			local total_lines = vim.api.nvim_buf_line_count(buf)
+			-- If they are within 3 lines of the bottom, keep auto-scrolling
+			if total_lines - cursor_row <= 3 then
+				should_scroll = true
+			end
+		end
+
 		local last_line_idx = vim.api.nvim_buf_line_count(buf) - 1
 		local last_line = vim.api.nvim_buf_get_lines(buf, last_line_idx, last_line_idx + 1, false)[1]
 		local lines = vim.split(text, "\n")
@@ -119,10 +134,8 @@ function M.append_text(buf, text)
 			vim.api.nvim_buf_set_lines(buf, -1, -1, false, { unpack(lines, 2) })
 		end
 
-		-- Auto-scroll to bottom
-		local wins = vim.fn.win_findbuf(buf)
-		if #wins > 0 then
-			local win = wins[1]
+		-- Auto-scroll to bottom ONLY if they haven't scrolled away
+		if should_scroll and win then
 			pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
 		end
 	end)
