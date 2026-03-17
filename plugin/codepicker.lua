@@ -53,3 +53,11 @@ vim.api.nvim_create_user_command("CodePickerStop", function()
 	job.stop_all()
 	print("🛑 Server stopped")
 end, {})
+
+vim.api.nvim_create_user_command("CodePickerApprove", function()
+	require("codepicker.agent").handle_approval(true)
+end, {})
+
+vim.api.nvim_create_user_command("CodePickerDeny", function()
+	require("codepicker.agent").handle_approval(false)
+end, {})

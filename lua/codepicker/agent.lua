@@ -5,36 +5,50 @@ local ui = require("codepicker.ui")
 local log = require("codepicker.log")
 local job = require("codepicker.job")
 
--- Handle approval requests from the Sentinel
-local function request_approval(req_id, command, reason, on_decision)
-	vim.schedule(function()
-		local msg = string.format("⚠️  Sentinel Alert\nCommand: %s\nReason: %s\nAllow execution?", command, reason)
-		vim.ui.select({ "Yes", "No" }, {
-			prompt = msg,
-			format_item = function(item)
-				return item
-			end,
-		}, function(choice)
-			local approved = (choice == "Yes")
-			-- Send decision back to server
-			local payload = vim.fn.json_encode({ id = req_id, approved = approved })
-			job.run({
-				"curl",
-				"-X",
-				"POST",
-				"-H",
-				"Content-Type: application/json",
-				"-d",
-				payload,
-				server.url("/agent/approve"),
-			}, function() end)
+-- Queue for non-blocking Sentinel approvals
+local pending_approvals = {}
 
-			if approved then
-				print("✅ Command Approved")
-			else
-				print("🛑 Command Blocked")
-			end
-		end)
+-- Non-blocking request
+local function request_approval(req_id, command, reason)
+	table.insert(pending_approvals, { id = req_id, command = command, reason = reason })
+
+	vim.schedule(function()
+		local msg = string.format(
+			"Agent wants to run: `%s`\nReason: %s\n\nRun :CodePickerApprove (or <leader>cy) to allow.",
+			command,
+			reason
+		)
+		vim.notify(msg, vim.log.levels.WARN, { title = "⚠️ Sentinel Alert" })
+	end)
+end
+
+-- Process the oldest pending request
+function M.handle_approval(approved)
+	if #pending_approvals == 0 then
+		vim.notify("No pending Sentinel requests.", vim.log.levels.INFO, { title = "CodePicker" })
+		return
+	end
+
+	local req = table.remove(pending_approvals, 1)
+	local payload = vim.fn.json_encode({ id = req.id, approved = approved })
+
+	job.run({
+		"curl",
+		"-X",
+		"POST",
+		"-H",
+		"Content-Type: application/json",
+		"-d",
+		payload,
+		server.url("/agent/approve"),
+	}, function() end)
+
+	vim.schedule(function()
+		if approved then
+			vim.notify("✅ Approved: " .. req.command, vim.log.levels.INFO, { title = "CodePicker Sentinel" })
+		else
+			vim.notify("🛑 Blocked: " .. req.command, vim.log.levels.WARN, { title = "CodePicker Sentinel" })
+		end
 	end)
 end
 
@@ -59,7 +73,6 @@ function M.run_task(query)
 		"-s",
 		url,
 	}, function(line)
-		-- Parse SSE "data: {...}" lines
 		local data_str = line:match("^data: (.+)$")
 		if not data_str then
 			return
@@ -72,10 +85,9 @@ function M.run_task(query)
 
 		vim.schedule(function()
 			if event.type == "thought" then
-				-- Stream thoughts/content to buffer
 				ui.append_text(buf, event.content)
 			elseif event.type == "approval_req" then
-				-- Trigger Blocking UI for Sentinel
+				-- Push to non-blocking queue instead of UI prompt
 				request_approval(event.id, event.command, event.reason)
 			elseif event.type == "error" then
 				ui.append_text(buf, "\n❌ Error: " .. event.msg)
