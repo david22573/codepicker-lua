@@ -54,8 +54,8 @@ end
 
 function M.run_task(query)
 	if not server.is_running() then
-		log.error("Server not running. Run :CodePickerServe first.")
-		return
+		log.info("Starting server...")
+		server.start()
 	end
 
 	local buf = ui.create_scratch_buf("markdown")
@@ -64,39 +64,63 @@ function M.run_task(query)
 
 	ui.append_text(buf, "# 🤖 Agent Task: " .. query .. "\n\n")
 
-	local url = server.url("/agent/task?q=" .. vim.fn.fnameescape(query))
-
-	-- SSE Stream Handler
-	job.run({
-		"curl",
-		"-N",
-		"-s",
-		url,
-	}, function(line)
-		local data_str = line:match("^data: (.+)$")
-		if not data_str then
-			return
-		end
-
-		local ok, event = pcall(vim.fn.json_decode, data_str)
-		if not ok or not event then
-			return
-		end
-
-		vim.schedule(function()
-			if event.type == "thought" then
-				ui.append_text(buf, event.content)
-			elseif event.type == "approval_req" then
-				-- Push to non-blocking queue instead of UI prompt
-				request_approval(event.id, event.command, event.reason)
-			elseif event.type == "error" then
-				ui.append_text(buf, "\n❌ Error: " .. event.msg)
-			elseif event.type == "done" then
+	-- FIX: Wait for the server to actually be listening on the port
+	server.wait_ready(function(ready)
+		if not ready then
+			vim.schedule(function()
 				if progress then
 					progress:stop()
 				end
-				ui.append_text(buf, "\n✨ Task Completed.")
+				ui.append_text(
+					buf,
+					"\n❌ Error: Background server failed to start or respond. Check :CodePickerStatus"
+				)
+			end)
+			return
+		end
+
+		local url = server.url("/agent/task?q=" .. vim.fn.fnameescape(query))
+
+		-- SSE Stream Handler
+		job.run({
+			"curl",
+			"-N",
+			"-s",
+			url,
+		}, function(line)
+			local data_str = line:match("^data: (.+)$")
+			if not data_str then
+				return
 			end
+
+			local ok, event = pcall(vim.fn.json_decode, data_str)
+			if not ok or not event then
+				return
+			end
+
+			vim.schedule(function()
+				if event.type == "thought" then
+					ui.append_text(buf, event.content)
+				elseif event.type == "approval_req" then
+					request_approval(event.id, event.command, event.reason)
+				elseif event.type == "error" then
+					ui.append_text(buf, "\n❌ Error: " .. event.msg)
+				elseif event.type == "done" then
+					if progress then
+						progress:stop()
+					end
+					ui.append_text(buf, "\n✨ Task Completed.")
+				end
+			end)
+		end, function(code)
+			vim.schedule(function()
+				if progress then
+					progress:stop()
+				end
+				if code ~= 0 then
+					ui.append_text(buf, "\n❌ Connection failed (curl exit code: " .. code .. ")")
+				end
+			end)
 		end)
 	end)
 end
