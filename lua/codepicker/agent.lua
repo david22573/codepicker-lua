@@ -79,13 +79,16 @@ function M.run_task(query)
 			return
 		end
 
-		local url = server.url("/agent/task?q=" .. vim.fn.fnameescape(query))
+		local url = server.url("/agent/task")
 
 		-- SSE Stream Handler
 		job.run({
 			"curl",
 			"-N",
 			"-s",
+			"-G", -- Tell curl this is a GET request
+			"--data-urlencode",
+			"q=" .. query, -- Let curl safely encode all spaces and weird characters
 			url,
 		}, function(line)
 			local data_str = line:match("^data: (.+)$")
