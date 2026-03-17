@@ -22,18 +22,21 @@ function M.setup(opts)
 	config.setup(opts)
 
 	-- Auto-start Server
-	vim.api.nvim_create_autocmd("VimEnter", {
-		once = true,
-		callback = function()
-			if config.options.auto_start ~= false then
-				log.debug("Auto-starting server")
-				-- We ensure the server is ready before we need it
-				if not server.is_running() then
-					server.start()
-				end
-			end
-		end,
-	})
+	local function boot_server()
+		if config.options.auto_start ~= false and not server.is_running() then
+			log.debug("Auto-starting server")
+			server.start()
+		end
+	end
+
+	if vim.v.vim_did_enter == 1 then
+		boot_server()
+	else
+		vim.api.nvim_create_autocmd("VimEnter", {
+			once = true,
+			callback = boot_server,
+		})
+	end
 
 	-- Cleanup on Exit
 	vim.api.nvim_create_autocmd("VimLeavePre", {
